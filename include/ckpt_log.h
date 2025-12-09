@@ -18,7 +18,6 @@
 #define MAX_CKP_LOG_ENTR
 
 #ifndef MAX_CKP_LOG_ENTRIES
-// 默认日志大小：64MB，可按需调整
 #define MAX_CKP_LOG_ENTRIES (64UL * 1024 * 1024)
 #endif
 
@@ -35,13 +34,11 @@ class log_entry_hdr {
 public:
     int32_t id; //id of inode that has modifications
     int16_t count; // number of entries in the log
-    // **移除：不再需要全局覆盖数**
     // int16_t coveredNodes; 
     int16_t last_index; // last valid gp of the inode
     int32_t next; // next inode id
     int16_t level;
-    int32_t parent_id; // **新增：父节点ID**
-    // **修改构造函数：移除 coveredNodes 参数**
+    int32_t parent_id;
     log_entry_hdr(int32_t id, int16_t last_index, int32_t next, int16_t level, int32_t parent_id) : id(id), last_index(last_index), next(next), level(level), parent_id(parent_id) {
         count = 0;
     }
@@ -70,7 +67,7 @@ struct WalDeltaHeader {
     int32_t  inode_id;
     int32_t  last_index;
     int32_t  next;
-    int32_t  parent_id;  // **新增**
+    int32_t  parent_id; 
 };
 
 struct WalDeltaEntry {
@@ -89,8 +86,8 @@ public:
     Val_t value[fanout];
     int16_t covered_nodes[fanout/2]; 
 
-    WalDeltaHeader delta_hdr{};                  // 新增：增量日志头
-    WalDeltaEntry  delta_entries[fanout]{};      // 新增：增量槽位集合
+    WalDeltaHeader delta_hdr{};                 
+    WalDeltaEntry  delta_entries[fanout]{};     
 
     void initArrays()
     {
@@ -100,17 +97,15 @@ public:
         memset(covered_nodes, 0, sizeof(covered_nodes));
     }
 
-    // **修改构造函数以匹配新的 log_entry_hdr**
     dram_log_entry_t(int32_t id, int16_t last_index, int32_t next, int16_t level, int32_t parent_id) : hdr(id, last_index, next, level, parent_id) {
         initArrays();
     }
 
-    // **修改 setKeyVal 以包含 covered_nodes，使其更健壮**
     void setKeyVal(int32_t idx, Key_t key, Val_t value, int16_t covered) {
         gp_idx[hdr.count] = idx;
         this->key[hdr.count] = key;
         this->value[hdr.count] = value;
-        this->covered_nodes[hdr.count] = covered; // 直接使用 hdr.count 作为索引
+        this->covered_nodes[hdr.count] = covered;
         hdr.count += 1;
     }
 
@@ -141,7 +136,6 @@ public:
     size_t getPayLoadSize() {
         size_t activated_count = hdr.count;
         return sizeof(nvm_log_entry_t) * activated_count;
-        //return sizeof(Key_t) * activated_count + sizeof(Val_t) * activated_count + sizeof(int32_t) * activated_count;
     }
 
     inline void initDelta(int32_t inode_id,
@@ -197,7 +191,6 @@ public:
         end_persistent = 0;
         start_persistent = 0;
         log_size = maxSize;
-        // 要求 log_size 为 2 的幂
         mask = log_size - 1;
     }
 
@@ -248,7 +241,6 @@ public:
     long current_inode_idx;
     vector<int> inode_count_on_each_level;
 
-    // 游标
     AlignedAtomicSizeT a_consumed_start; // use: a_consumed_start.v
     AlignedAtomicSizeT a_produced_end;   // use: a_produced_end.v
     AlignedAtomicSizeT a_durable_end;    // use: a_durable_end.v
@@ -265,7 +257,6 @@ public:
     ~CkptLog();
     #endif
 
-    // 原有整块写
     void enq(dram_log_entry_t *entry);
 
     log_entry_hdr *put_log_entry(dram_log_entry_t *entry);
@@ -393,18 +384,16 @@ public:
 
         struct EvFull {
             dram_log_entry_t* e;
-            size_t aligned; // 预计算对齐后大小
+            size_t aligned;
         };
         struct EvDelta {
-            // 一个“单槽”增量条目
             WalDeltaHeader hdr;
             WalDeltaEntry  entry;
-            size_t aligned; // 预估对齐大小（用于阈值控制，最终会在 run 内聚合）
+            size_t aligned;
         };
         struct Event {
             Kind    kind;
-            uint64_t seq; // 本线程捕获序号
-            // 简单变体
+            uint64_t seq;
             EvFull  f;
             EvDelta d;
         };
@@ -412,10 +401,10 @@ public:
         void maybeFlush();
 
         CkptLog* owner_;
-        inline static thread_local uint64_t s_seq_; // 本线程单调递增序号
+        inline static thread_local uint64_t s_seq_;
 
-        std::vector<Event> events_;          // 按捕获顺序追加
-        size_t             bytes_est_{0};    // 粗略估计（run 聚合后会更小）
+        std::vector<Event> events_;     
+        size_t             bytes_est_{0};
         Clock::time_point  last_flush_;
     };
 

@@ -14,14 +14,12 @@
 using namespace std;
 
 #if ENABLE_DELTA_LOG
-// 确保 DELTA 布局满足“首两个字节即 tag”
 static_assert(offsetof(WalDeltaHeader, type) == 0,
               "WalDeltaHeader::type must be the first field");
 static_assert(std::is_same<decltype(WalDeltaHeader{}.type), uint16_t>::value,
               "WalDeltaHeader::type must be uint16_t");
 #endif
 
-// 统一解析并应用一段连续缓冲 [base0, base0+batch)
 static size_t parseApplySpan(CkptLog* self,
                              const unsigned char* base0,
                              size_t batch,
@@ -99,7 +97,6 @@ static size_t parseApplySpan(CkptLog* self,
             continue;
         }
 
-        // 未知 tag 或不完整，等待后续批次
         break;
     }
 
@@ -133,7 +130,6 @@ int CkptLogNVM::init(root_obj *root, size_t maxSize) {
     }
 }
 
-// 构造函数
 #if ENABLE_PMEM_STATS
 CkptLog::CkptLog(size_t logSize, int current_highest_level, ValueList *va_list)
     : retry_count(0), current_highest_level(current_highest_level), valueList(va_list),
@@ -151,7 +147,6 @@ CkptLog::CkptLog(size_t logSize)
     inode_count_on_each_level.reserve(MAX_LEVEL);
 }
 
-// 析构函数
 CkptLog::~CkptLog() {
     delete ckptlog;
 }
@@ -161,7 +156,6 @@ void CkptLog::enq(dram_log_entry_t *entry)
 {
     if (!entry) return;
 
-    // 计算条目长度：2字节类型标记 + 头 + 负载，对齐到 cacheline
     const size_t tag_sz   = sizeof(uint16_t); // WalLogType
     const size_t hdr_sz   = sizeof(log_entry_hdr);
     const size_t body_sz  = entry->getPayLoadSize(); // = sizeof(nvm_log_entry_t) * count
@@ -177,17 +171,13 @@ void CkptLog::enq(dram_log_entry_t *entry)
         }
     }
 
-    // 起始地址（可按字节写入）
     auto *base = reinterpret_cast<unsigned char *>(slot);
 
-    // 1) 写类型标记：FULL
     *reinterpret_cast<uint16_t *>(base) = WAL_LOG_TYPE_FULL;
 
-    // 2) 写 header（位于标记之后）
     auto *hdr = reinterpret_cast<log_entry_hdr *>(base + tag_sz);
-    initLogEntryHeaderFromDramLogEntry(hdr, entry); // 复用现有函数初始化头部（包含 count 等）
+    initLogEntryHeaderFromDramLogEntry(hdr, entry);
 
-    // 3) 写 payload（nvm_log_entry_t[count]）
     auto *out = reinterpret_cast<nvm_log_entry_t *>(reinterpret_cast<unsigned char *>(hdr) + sizeof(log_entry_hdr));
     for (int i = 0; i < entry->hdr.count; ++i) {
         out[i].gp_idx        = entry->gp_idx[i];
@@ -196,12 +186,10 @@ void CkptLog::enq(dram_log_entry_t *entry)
         out[i].covered_nodes = entry->covered_nodes[i];
     }
 
-    // 4) 尾部对齐填充
     if (entry_sz > used) {
         std::memset(base + used, 0, entry_sz - used);
     }
     
-    // 5) 推进生产游标
     a_produced_end.v.fetch_add(entry_sz, std::memory_order_release);
 }
 
@@ -320,7 +308,6 @@ log_entry_hdr *CkptLog::nvm_log_enq(size_t entry_size)
     return log_entry_hdr;
 }
 
-// 新：强制把尚未持久化的 [a_durable_end, a_produced_end) 全部刷到 NVM（忽略阈值）
 void CkptLog::forcePersist()
 {
     for (;;) {
@@ -329,7 +316,6 @@ void CkptLog::forcePersist()
         if (produced <= durable) break;
         size_t len = produced - durable;
 
-        // 处理环形两段
         size_t off       = nvm_log_index(durable);
         size_t tail_left = ckptlog->log_size - off;
         if (len <= tail_left) {
@@ -340,7 +326,6 @@ void CkptLog::forcePersist()
         }
         PmemManager::drain(CKPLOGPOOL);
 
-        // 持久化元数据（可恢复 durable 边界）
         ckptlog->end_persistent = produced;
         PmemManager::flushNoDrain(CKPLOGPOOL, &ckptlog->end_persistent, sizeof(ckptlog->end_persistent));
         PmemManager::drain(CKPLOGPOOL);
@@ -349,10 +334,8 @@ void CkptLog::forcePersist()
     }
 }
 
-// 新：使用新游标强制回放并可选重置
 void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
 {
-    // 先把 durable 推到 produced，避免解析首条不完整
     forcePersist();
 
     for (;;) {
@@ -360,7 +343,6 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
         size_t durable  = a_durable_end.v.load(std::memory_order_acquire);
         if (consumed >= durable) break;
 
-        // 若生产继续推进，先把 durable 补到最新
         size_t produced = a_produced_end.v.load(std::memory_order_acquire);
         if (produced > durable) {
             forcePersist();
@@ -369,10 +351,8 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
         }
 
         size_t window = durable - consumed;
-        // 优先尝试最多一圈，减少跨尾复杂度
         size_t got = reclaimBatch(pmemInodePool, std::min(window, ckptlog->log_size));
         if (got == 0) {
-            // 退一步：仅尝试吃到环尾，避免跨尾解析敏感
             size_t idx     = nvm_log_index(consumed);
             size_t to_tail = ckptlog->log_size - idx;
             size_t slice   = std::min(window, to_tail);
@@ -380,12 +360,10 @@ void CkptLog::forceReclaim(PmemInodePool *pmemInodePool)
         }
 
         if (got == 0) {
-            // 仍无进展：轻量让出 CPU，等待可能的持久/生产推进后重试
             std::this_thread::yield();
         }
     }
 
-    // 仅在确实清空 backlog 时再重置环
     size_t c = a_consumed_start.v.load(std::memory_order_acquire);
     size_t d = a_durable_end.v.load(std::memory_order_acquire);
     if (c < d) return;
@@ -415,7 +393,6 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
     size_t batch  = std::min(window, max_bytes);
     if (!batch) return 0;
 
-    // 关键：限制单次批量不超过环大小，确保跨尾最多一次拼接
     batch = std::min(batch, ckptlog->log_size);
 
     const size_t idx  = nvm_log_index(start);
@@ -424,11 +401,9 @@ size_t CkptLog::reclaimBatch(PmemInodePool *pmemInodePool, size_t max_bytes)
     size_t consumed = 0;
 
     if (batch <= tail) {
-        // 不跨尾：零拷贝解析
         const unsigned char* base = reinterpret_cast<const unsigned char*>(nvm_log_at(start));
         consumed = parseApplySpan(this, base, batch, pmemInodePool);
     } else {
-        // 跨尾：拷贝到临时缓冲后统一解析（batch 已被夹到 <= log_size）
         std::vector<unsigned char> buf(batch);
         std::memcpy(buf.data(),           nvm_log_at(start), tail);
         std::memcpy(buf.data() + tail,    nvm_log_at(0),     batch - tail);
@@ -482,19 +457,16 @@ unsigned int CkptLog::nvm_log_index(unsigned long idx)
     if (log_size) {
         return static_cast<unsigned int>(idx % log_size);
     }
-    // fallback（未初始化时避免崩溃）
     return static_cast<unsigned int>(idx);
 }
 
-// 通过环形索引定位 NVM 中的条目头地址
 log_entry_hdr *CkptLog::nvm_log_at(size_t index)
 {
     const unsigned int off = nvm_log_index(index);
-    auto *base = const_cast<unsigned char *>(ckptlog->buf); // buf 为持久化起始
+    auto *base = const_cast<unsigned char *>(ckptlog->buf);
     return reinterpret_cast<log_entry_hdr *>(base + off);
 }
 
-// 基于“已持久化边界”的无锁判空
 bool CkptLog::isLogEmpty()
 {
     size_t c = a_consumed_start.v.load(std::memory_order_acquire);
@@ -502,7 +474,6 @@ bool CkptLog::isLogEmpty()
     return c >= d;
 }
 
-// 返回已持久化的可消费区间长度
 size_t CkptLog::getLogQueueSize()
 {
     size_t c = a_consumed_start.v.load(std::memory_order_acquire);
@@ -541,7 +512,6 @@ double CkptLog::calculatePmemSearchEfficiency(long vnode_count)
 
 bool CkptLog::flushOnce()
 {
-    // 防止并发 flush
     if (flush_busy.test_and_set(std::memory_order_acq_rel)) return false;
 
     size_t durable  = a_durable_end.v.load(std::memory_order_acquire);
@@ -553,13 +523,11 @@ bool CkptLog::flushOnce()
 
     size_t len = produced - durable;
 
-    // 阈值门控（可调）：不足 PERSISTENT_THRESHOLD 可暂缓
     if (len < PERSISTENT_THRESHOLD) {
         flush_busy.clear(std::memory_order_release);
         return false;
     }
 
-    // 处理环形两段 flush
     size_t off = nvm_log_index(durable);
     size_t tail_bytes = ckptlog->log_size - off;
     if (len <= tail_bytes) {
@@ -568,13 +536,10 @@ bool CkptLog::flushOnce()
         PmemManager::flushNoDrain(CKPLOGPOOL, nvm_log_at(durable), tail_bytes);
         PmemManager::flushNoDrain(CKPLOGPOOL, nvm_log_at(0), len - tail_bytes);
     }
-    // 单次 drain
     PmemManager::drain(CKPLOGPOOL);
 
-    // 推进 durable_end（release，让回放线程看到完整持久内容）
     a_durable_end.v.store(produced, std::memory_order_release);
 
-    // 可选：镜像持久元数据（不阻塞）
     std::unique_lock<std::shared_mutex> lk(mtx, std::try_to_lock);
     if (lk.owns_lock()) {
         ckptlog->end_persistent   = produced;
@@ -590,18 +555,14 @@ void CkptLog::waitDurable(size_t lsn)
     for (;;) {
         size_t d = a_durable_end.v.load(std::memory_order_acquire);
         if (d >= lsn) break;
-        // 轻量自旋或 sleep/yield
         std::this_thread::yield();
     }
 }
 
-// 成员函数实现：从 DRAM 日志条目头复制必要字段
 void CkptLog::initLogEntryHeaderFromDramLogEntry(log_entry_hdr *dst,
                                                  const dram_log_entry_t *src)
 {
-    // 基本防御
     if (!dst || !src) return;
-    // 复制头字段
     dst->id         = src->hdr.id;
     dst->count      = src->hdr.count;
     dst->last_index = src->hdr.last_index;
@@ -634,7 +595,6 @@ size_t CkptLog::getBacklogGap() const
 
 bool CkptLog::tryFlushOnce()
 {
-    // 封装内部 flushOnce()；按内部阈值决定是否执行
     return flushOnce();
 }
 
@@ -681,7 +641,6 @@ void CkptLog::enqBatch(const std::vector<dram_log_entry_t*>& entries) {
 
     unsigned char* base = reserveChunk(total);
     if (!base) {
-        // 回退逐条
         for (auto* e : entries) enq(e);
         return;
     }
@@ -732,7 +691,6 @@ void CkptLog::enqDeltaBatch(const std::vector<DeltaPack>& packs) {
 
     unsigned char* base = reserveChunk(total);
     if (!base) {
-        // 回退逐条
         for (const auto& p : packs) {
             appendDeltaLog(p.hdr.inode_id,
                            p.hdr.last_index,
@@ -769,7 +727,6 @@ void CkptLog::enqDeltaBatch(const std::vector<DeltaPack>& packs) {
     commitChunk(total);
 }
 
-// ===== Batcher 实现 =====
 void CkptLog::Batcher::addFull(dram_log_entry_t* e) {
     if (!e) return;
     const size_t used = sizeof(uint16_t) + sizeof(log_entry_hdr) + e->getPayLoadSize();
@@ -807,7 +764,6 @@ void CkptLog::Batcher::addDeltaSlot(int32_t inode_id,
     de.value   = value;
     de.covered = covered;
 
-    // 估算大小：header+1entry（若 run 聚合，会更小）
     const size_t used = sizeof(WalDeltaHeader) + sizeof(WalDeltaEntry);
     const size_t aligned = PmemManager::align_uint_to_cacheline(static_cast<unsigned>(used));
 
@@ -839,8 +795,6 @@ void CkptLog::Batcher::flush() {
     last_flush_ = Clock::now();
     if (evs.empty()) return;
 
-    // 1) 保持捕获顺序：events_ 已按 seq 追加（单线程），无需排序
-    //    合并为多个“run”，相同类型相邻事件合并提交；DELTA run 内再按 inode 聚合为 pack
     size_t i = 0, n = evs.size();
     while (i < n) {
         const Kind k = evs[i].kind;
@@ -848,13 +802,11 @@ void CkptLog::Batcher::flush() {
         while (j < n && evs[j].kind == k) ++j;
 
         if (k == Kind::Full) {
-            // 收集 [i, j) 为 FULL 组
             std::vector<dram_log_entry_t*> group;
             group.reserve(j - i);
             for (size_t t = i; t < j; ++t) group.push_back(evs[t].f.e);
             owner_->enqBatch(group);
         } else { // Kind::Delta
-            // 将 [i, j) 内连续、inode 元字段相同的 DELTA 合并成 pack
             std::vector<CkptLog::DeltaPack> packs;
             packs.reserve(j - i);
             size_t p = i;
@@ -862,7 +814,6 @@ void CkptLog::Batcher::flush() {
                 DeltaPack pack{};
                 pack.hdr = evs[p].d.hdr;
                 pack.hdr.count = 0;
-                // 合并同一 inode 元字段（inode_id/last_index/next/parent_id）
                 size_t q = p;
                 for (; q < j; ++q) {
                     const auto& cur = evs[q].d;
@@ -870,7 +821,7 @@ void CkptLog::Batcher::flush() {
                         cur.hdr.last_index != pack.hdr.last_index ||
                         cur.hdr.next       != pack.hdr.next ||
                         cur.hdr.parent_id  != pack.hdr.parent_id) {
-                        break; // 到了不同 inode 或不同元版本，结束本 pack
+                        break;
                     }
                     pack.entries.push_back(cur.entry);
                 }

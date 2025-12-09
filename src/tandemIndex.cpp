@@ -1518,14 +1518,10 @@ void TandemIndex::maybeActivateHotRegion() {
             //std::cout << "  [SGP] inode " << inode->getId() << "queued for rebalance; skip\n";
             continue;
         }
-#if 0
         // activate SGPs at those anchor keys
-        // TODO - get lock
         for(uint64_t key : anchors){
             inode->activateSGP(key);
-            //TODO - checkpoint or flush
         }
-#endif        
     } 
     // clear current epoch histogram
     tracker_->DropLastEpochHistogram();

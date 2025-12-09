@@ -9,15 +9,9 @@ typedef uint64_t Val_t; // 8 bytes
 
 const int MAX_LEVEL = 20;
 
-// 使用一个数组来为不同层级定义不同的稳定性系数
-// 索引代表 Inode 的层级 (level)
-// 建议：高层级系数小（更敏感），低层级系数大（更宽容）
 const double SEARCH_STABILITY_COEFFICIENT_BY_LEVEL[MAX_LEVEL] = {
-    // Level 0-1: 较大的值，减少底层不必要的分裂
     3.0, 3.0, 
-    // Level 2-4: 逐渐减小
-    1.8, 1.5, 1.5,
-    //mLevel 5+: 较小的值，保持顶层稀疏和高效
+    2.0, 2.0, 1.5,
     1.5, 1.5, 1.5, 1.5, 1.5, 
     1.2, 1.2, 1.2, 1.2, 1.2,
     1.2, 1.2, 1.2, 1.2, 1.2
